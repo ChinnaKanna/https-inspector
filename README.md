@@ -1,25 +1,113 @@
 # https-inspector
 
-A Cloudflare Worker that inspects incoming HTTP requests and returns detailed metadata about the request, including network fingerprints, TLS details, and geolocation data.
+A Cloudflare Worker that inspects incoming HTTP requests and returns **all available metadata** about the request, including network fingerprints (JA4/JA3), TLS details, bot management signals, geolocation, and request headers.
 
 ## What It Returns
 
-When you make a request to the worker, it responds with a JSON object containing:
-
 ### Basic Request Info
-- `method` — HTTP method (GET, POST, etc.)
-- `url` — Full request URL
-- `client_ip` — Client IP address (from `cf-connecting-ip`)
-- `user_agent` — User agent string
-- `headers` — All HTTP headers as key-value pairs
+```json
+{
+  "method": "GET",
+  "url": "https://https-inspector.chinnabanglore.workers.dev/",
+  "path": "/",
+  "client_ip": "207.60.82.113",
+  "user_agent": "Mozilla/5.0 ...",
+  "headers": { ... },
+  "header_count": 18,
+  "total_header_bytes": 1234,
+  "cf": { ... }
+}
+```
 
-### Cloudflare `cf` Object
-- **Bot Management**: `ja4`, `ja3_hash`, `score`, `verified_bot`, `static_resource`, `corporate_proxy`
-- **TLS**: `tls_version`, `tls_cipher`, `tls_client_auth` (client certificate details when using Cloudflare Access/API Shield)
-- **Geolocation**: `asn`, `as_organization`, `city`, `region`, `region_code`, `country`, `continent`, `coordinates`, `postal_code`, `metro_code`, `timezone`, `is_eu_country`
-- **Network**: `colo`, `http_protocol`, `request_priority`
+### Cloudflare `cf` Object — Full Reference
 
-> **Note**: `ja4`/`ja3_hash` require Cloudflare Bot Management. `tls_client_auth` requires Cloudflare Access or API Shield.
+#### Network / Origin
+| Field | Type | Description |
+|-------|------|-------------|
+| `asn` | `number` | Autonomous System Number |
+| `as_organization` | `string` | ASN organization name |
+| `colo` | `string` | Cloudflare data center code (e.g. "ATX", "LUX") |
+| `http_protocol` | `string` | HTTP protocol (e.g. "HTTP/2", "HTTP/3") |
+| `tls_version` | `string` | TLS version (e.g. "TLSv1.3") |
+| `tls_cipher` | `string` | TLS cipher suite (e.g. "AEAD-AES128-GCM-SHA256") |
+
+#### Geolocation
+| Field | Type | Description |
+|-------|------|-------------|
+| `city` | `string` | City name |
+| `region` | `string` | Region/State name |
+| `region_code` | `string` | Region code (e.g. "TX") |
+| `country` | `string` | Two-letter country code |
+| `continent` | `string` | Continent code (e.g. "NA") |
+| `coordinates` | `object` | `{ latitude, longitude }` |
+| `postal_code` | `string` | Postal/ZIP code |
+| `metro_code` | `string` | DMA metro code |
+| `timezone` | `string` | Timezone name |
+| `is_eu_country` | `boolean` | Whether country is in EU |
+
+#### Bot Management (requires Cloudflare Bot Management)
+| Field | Type | Description |
+|-------|------|-------------|
+| `bot_management.score` | `number` | Bot score (0-100) |
+| `bot_management.verified_bot` | `boolean` | Known verified bot |
+| `bot_management.static_resource` | `boolean` | Static resource request |
+| `bot_management.corporate_proxy` | `boolean` | Corporate proxy detected |
+| `bot_management.ja4` | `string` | **JA4 network fingerprint** |
+| `bot_management.ja3_hash` | `string` | **JA3 TLS fingerprint hash** |
+| `bot_management.js_detection.passed` | `boolean` | JS challenge passed |
+| `bot_management.detection_ids` | `number[]` | Detection IDs |
+| `verified_bot_category` | `string` | Bot category (if verified) |
+
+#### TLS Client Authentication (requires Cloudflare Access / API Shield)
+| Field | Type | Description |
+|-------|------|-------------|
+| `tls_client_auth.cert_issuer_dn` | `string` | Certificate issuer DN |
+| `tls_client_auth.cert_subject_dn` | `string` | Certificate subject DN |
+| `tls_client_auth.cert_verified` | `string` | Verification status |
+| `tls_client_auth.cert_fingerprint_sha256` | `string` | SHA-256 fingerprint |
+| `tls_client_auth.cert_fingerprint_sha1` | `string` | SHA-1 fingerprint |
+| `tls_client_auth.cert_serial` | `string` | Serial number |
+| `tls_client_auth.cert_not_before` | `string` | Valid from |
+| `tls_client_auth.cert_not_after` | `string` | Valid until |
+| `tls_client_auth.cert_presented` | `string` | Certificate presented |
+
+#### Browser Request Priority
+| Field | Type | Description |
+|-------|------|-------------|
+| `request_priority.weight` | `number` | HTTP/2 weight |
+| `request_priority.exclusive` | `boolean` | HTTP/2 exclusive flag |
+| `request_priority.group` | `number` | HTTP/2 stream group |
+| `request_priority.group_weight` | `number` | HTTP/2 group weight |
+
+#### Host Metadata (Cloudflare for SaaS)
+| Field | Type | Description |
+|-------|------|-------------|
+| `host_metadata` | `object` | Custom host metadata |
+
+---
+
+## What Cloudflare Workers CANNOT Provide
+
+Cloudflare Workers runs in a **sandboxed V8 isolate** — it has no access to raw network layers. The following are **impossible** to get from a Worker:
+
+| Detail | Available? | Why |
+|--------|-----------|-----|
+| TCP handshake (SYN, SYN-ACK, ACK) | ❌ No | Below Workers runtime |
+| TCP packet lengths / window size | ❌ No | No raw socket access |
+| HTTP/2 frame sizes | ❌ No | Abstracted by runtime |
+| Raw TLS Client Hello / Server Hello bytes | ❌ No | TLS terminated at edge, only metadata exposed |
+| TLS key exchange details | ❌ No | Not exposed to V8 |
+| IP TTL, TCP options | ❌ No | Network layer invisible |
+| **JA4 fingerprint** | ✅ Yes | Via `cf.bot_management.ja4` |
+| **JA3 hash** | ✅ Yes | Via `cf.bot_management.ja3_hash` |
+| **TLS version/cipher** | ✅ Yes | Via `cf.tls_version`, `cf.tls_cipher` |
+| **Client certificate** | ✅ Yes | Via `cf.tls_client_auth` |
+| **Bot score** | ✅ Yes | Via `cf.bot_management.score` |
+| **Geo/ASN/Colo** | ✅ Yes | Full `cf` object |
+| **HTTP protocol** | ✅ Yes | Via `cf.http_protocol` |
+| **Request priority** | ✅ Yes | Via `cf.request_priority` |
+
+> To capture raw TCP/TLS data you'd need **eBPF/XDP on bare metal**, **Wireshark/tcpdump**, or a **custom proxy with raw socket access** — not a serverless platform.
 
 ---
 
