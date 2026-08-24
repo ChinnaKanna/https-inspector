@@ -1,3 +1,7 @@
 name = "https-inspector"
 main = "build/index.js"
 compatibility_date = "2026-08-24"
+
+[observability.logs]
+enabled = false
+invocation_logs = true
