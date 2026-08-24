@@ -7,6 +7,7 @@ struct RequestDetails {
     method: String,
     url: String,
     path: String,
+    query_params: HashMap<String, String>,
     client_ip: String,
     user_agent: String,
     headers: HashMap<String, String>,
@@ -60,6 +61,12 @@ pub async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
     let url = req.url()?.to_string();
     let path = req.path();
     let method = req.method().to_string();
+
+    // Parse query parameters
+    let query_params: HashMap<String, String> = req.url()
+        .ok()
+        .and_then(|u| u.query_pairs().into_owned().collect::<HashMap<_, _>>().into())
+        .unwrap_or_default();
 
     let mut headers = HashMap::new();
     let mut total_header_bytes: usize = 0;
@@ -119,6 +126,7 @@ pub async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
         method,
         url,
         path,
+        query_params,
         client_ip,
         user_agent,
         headers,
