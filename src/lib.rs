@@ -6,40 +6,72 @@ use worker::*;
 struct RequestDetails {
     method: String,
     url: String,
+    path: String,
     client_ip: String,
     user_agent: String,
     headers: HashMap<String, String>,
+    header_count: usize,
+    total_header_bytes: usize,
     cf: Option<CfDetails>,
 }
 
 #[derive(Serialize)]
 struct CfDetails {
+    // Network / Origin
     asn: Option<u32>,
     as_organization: Option<String>,
-    city: Option<String>,
     colo: Option<String>,
-    continent: Option<String>,
-    country: Option<String>,
     http_protocol: Option<String>,
+    tls_version: Option<String>,
+    tls_cipher: Option<String>,
+
+    // Geolocation
+    city: Option<String>,
+    region: Option<String>,
+    region_code: Option<String>,
+    country: Option<String>,
+    continent: Option<String>,
     coordinates: Option<Coordinates>,
     postal_code: Option<String>,
     metro_code: Option<String>,
-    region: Option<String>,
-    region_code: Option<String>,
     timezone: Option<String>,
     is_eu_country: Option<bool>,
-    tls_version: Option<String>,
-    tls_cipher: Option<String>,
-    tls_client_auth: Option<TlsClientAuthDetails>,
+
+    // Bot Management
     bot_management: Option<BotManagementDetails>,
     verified_bot_category: Option<String>,
+
+    // TLS Client Authentication (Cloudflare Access / API Shield)
+    tls_client_auth: Option<TlsClientAuthDetails>,
+
+    // Browser Request Priority
     request_priority: Option<RequestPriorityDetails>,
+
+    // Host Metadata (Cloudflare for SaaS)
+    host_metadata: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
 struct Coordinates {
     latitude: f32,
     longitude: f32,
+}
+
+#[derive(Serialize)]
+struct BotManagementDetails {
+    score: Option<u32>,
+    static_resource: Option<bool>,
+    verified_bot: Option<bool>,
+    corporate_proxy: Option<bool>,
+    ja4: Option<String>,
+    ja3_hash: Option<String>,
+    js_detection: Option<JsDetectionDetails>,
+    detection_ids: Option<Vec<u32>>,
+}
+
+#[derive(Serialize)]
+struct JsDetectionDetails {
+    passed: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -60,16 +92,6 @@ struct TlsClientAuthDetails {
 }
 
 #[derive(Serialize)]
-struct BotManagementDetails {
-    score: Option<u32>,
-    static_resource: Option<bool>,
-    verified_bot: Option<bool>,
-    corporate_proxy: Option<bool>,
-    ja4: Option<String>,
-    ja3_hash: Option<String>,
-}
-
-#[derive(Serialize)]
 struct RequestPriorityDetails {
     weight: Option<usize>,
     exclusive: Option<bool>,
@@ -79,12 +101,26 @@ struct RequestPriorityDetails {
 
 #[event(fetch)]
 pub async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
-    let headers = req
-        .headers()
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect::<HashMap<String, String>>();
+    let url = req.url()?.to_string();
+    let path = req.path();
+    let method = req.method().to_string();
 
+    // Collect headers and compute sizes
+    let mut headers = HashMap::new();
+    let mut total_header_bytes: usize = 0;
+    for (key, value) in req.headers().into_iter() {
+        total_header_bytes += key.len() + value.len();
+        headers.insert(key, value);
+    }
+    let header_count = headers.len();
+
+    let client_ip = req
+        .headers()
+        .get("cf-connecting-ip")?
+        .unwrap_or_default();
+    let user_agent = req.headers().get("user-agent")?.unwrap_or_default();
+
+    // Extract all Cloudflare cf properties
     let cf_details = req.cf().map(|cf| {
         let tls_client_auth = cf.tls_client_auth().map(|auth| TlsClientAuthDetails {
             cert_issuer_dn_legacy: Some(auth.cert_issuer_dn_legacy()),
@@ -102,13 +138,21 @@ pub async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
             cert_presented: Some(auth.cert_presented()),
         });
 
-        let bot_management = cf.bot_management().map(|bm| BotManagementDetails {
-            score: Some(bm.score()),
-            static_resource: Some(bm.static_resource()),
-            verified_bot: Some(bm.verified_bot()),
-            corporate_proxy: Some(bm.corporate_proxy()),
-            ja4: bm.ja4(),
-            ja3_hash: bm.ja3_hash(),
+        let bot_management = cf.bot_management().map(|bm| {
+            let js_detection = bm.js_detection().map(|js| JsDetectionDetails {
+                passed: Some(js.passed()),
+            });
+
+            BotManagementDetails {
+                score: Some(bm.score()),
+                static_resource: Some(bm.static_resource()),
+                verified_bot: Some(bm.verified_bot()),
+                corporate_proxy: Some(bm.corporate_proxy()),
+                ja4: bm.ja4(),
+                ja3_hash: bm.ja3_hash(),
+                js_detection,
+                detection_ids: Some(bm.detection_ids()),
+            }
         });
 
         let coordinates = cf.coordinates().map(|(lat, lon)| Coordinates {
@@ -123,39 +167,43 @@ pub async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
             group_weight: Some(rp.group_weight),
         });
 
+        // host_metadata returns a JsValue, attempt to deserialize
+        let host_metadata = cf.host_metadata::<serde_json::Value>().ok().flatten();
+
         CfDetails {
             asn: cf.asn(),
             as_organization: cf.as_organization(),
-            city: cf.city(),
             colo: Some(cf.colo()),
-            continent: cf.continent(),
-            country: cf.country(),
             http_protocol: Some(cf.http_protocol()),
+            tls_version: Some(cf.tls_version()),
+            tls_cipher: Some(cf.tls_cipher()),
+            city: cf.city(),
+            region: cf.region(),
+            region_code: cf.region_code(),
+            country: cf.country(),
+            continent: cf.continent(),
             coordinates,
             postal_code: cf.postal_code(),
             metro_code: cf.metro_code(),
-            region: cf.region(),
-            region_code: cf.region_code(),
             timezone: Some(cf.timezone_name()),
             is_eu_country: Some(cf.is_eu_country()),
-            tls_version: Some(cf.tls_version()),
-            tls_cipher: Some(cf.tls_cipher()),
-            tls_client_auth,
             bot_management,
             verified_bot_category: cf.verified_bot_category(),
+            tls_client_auth,
             request_priority,
+            host_metadata,
         }
     });
 
     let details = RequestDetails {
-        method: req.method().to_string(),
-        url: req.url()?.to_string(),
-        client_ip: req
-            .headers()
-            .get("cf-connecting-ip")?
-            .unwrap_or_default(),
-        user_agent: req.headers().get("user-agent")?.unwrap_or_default(),
+        method,
+        url,
+        path,
+        client_ip,
+        user_agent,
         headers,
+        header_count,
+        total_header_bytes,
         cf: cf_details,
     };
 
