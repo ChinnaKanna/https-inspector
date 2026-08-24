@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use worker::*;
 
 #[derive(Serialize)]
@@ -121,79 +122,88 @@ pub async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
     let user_agent = req.headers().get("user-agent")?.unwrap_or_default();
 
     // Extract all Cloudflare cf properties
-    let cf_details = req.cf().map(|cf| {
-        let tls_client_auth = cf.tls_client_auth().map(|auth| TlsClientAuthDetails {
-            cert_issuer_dn_legacy: Some(auth.cert_issuer_dn_legacy()),
-            cert_issuer_dn: Some(auth.cert_issuer_dn()),
-            cert_issuer_dn_rfc2253: Some(auth.cert_issuer_dn_rfc2253()),
-            cert_subject_dn_legacy: Some(auth.cert_subject_dn_legacy()),
-            cert_subject_dn: Some(auth.cert_subject_dn()),
-            cert_subject_dn_rfc2253: Some(auth.cert_subject_dn_rfc2253()),
-            cert_verified: Some(auth.cert_verified()),
-            cert_not_after: Some(auth.cert_not_after()),
-            cert_not_before: Some(auth.cert_not_before()),
-            cert_fingerprint_sha1: Some(auth.cert_fingerprint_sha1()),
-            cert_fingerprint_sha256: Some(auth.cert_fingerprint_sha256()),
-            cert_serial: Some(auth.cert_serial()),
-            cert_presented: Some(auth.cert_presented()),
-        });
-
-        let bot_management = cf.bot_management().map(|bm| {
-            let js_detection = bm.js_detection().map(|js| JsDetectionDetails {
-                passed: Some(js.passed()),
+    // Wrap in catch_unwind because many Cf methods call .unwrap() internally
+    // and will panic if a JS property is missing
+    let cf_details = req.cf().and_then(|cf| {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let tls_client_auth = cf.tls_client_auth().map(|auth| TlsClientAuthDetails {
+                cert_issuer_dn_legacy: Some(auth.cert_issuer_dn_legacy()),
+                cert_issuer_dn: Some(auth.cert_issuer_dn()),
+                cert_issuer_dn_rfc2253: Some(auth.cert_issuer_dn_rfc2253()),
+                cert_subject_dn_legacy: Some(auth.cert_subject_dn_legacy()),
+                cert_subject_dn: Some(auth.cert_subject_dn()),
+                cert_subject_dn_rfc2253: Some(auth.cert_subject_dn_rfc2253()),
+                cert_verified: Some(auth.cert_verified()),
+                cert_not_after: Some(auth.cert_not_after()),
+                cert_not_before: Some(auth.cert_not_before()),
+                cert_fingerprint_sha1: Some(auth.cert_fingerprint_sha1()),
+                cert_fingerprint_sha256: Some(auth.cert_fingerprint_sha256()),
+                cert_serial: Some(auth.cert_serial()),
+                cert_presented: Some(auth.cert_presented()),
             });
 
-            BotManagementDetails {
-                score: Some(bm.score()),
-                static_resource: Some(bm.static_resource()),
-                verified_bot: Some(bm.verified_bot()),
-                corporate_proxy: Some(bm.corporate_proxy()),
-                ja4: bm.ja4(),
-                ja3_hash: bm.ja3_hash(),
-                js_detection,
-                detection_ids: Some(bm.detection_ids()),
+            let bot_management = cf.bot_management().map(|bm| {
+                let js_detection = bm.js_detection().map(|js| JsDetectionDetails {
+                    passed: Some(js.passed()),
+                });
+
+                BotManagementDetails {
+                    score: Some(bm.score()),
+                    static_resource: Some(bm.static_resource()),
+                    verified_bot: Some(bm.verified_bot()),
+                    corporate_proxy: Some(bm.corporate_proxy()),
+                    ja4: bm.ja4(),
+                    ja3_hash: bm.ja3_hash(),
+                    js_detection,
+                    detection_ids: Some(bm.detection_ids()),
+                }
+            });
+
+            let coordinates = cf.coordinates().map(|(lat, lon)| Coordinates {
+                latitude: lat,
+                longitude: lon,
+            });
+
+            let request_priority = cf.request_priority().map(|rp| RequestPriorityDetails {
+                weight: Some(rp.weight),
+                exclusive: Some(rp.exclusive),
+                group: Some(rp.group),
+                group_weight: Some(rp.group_weight),
+            });
+
+            // host_metadata returns a JsValue, attempt to deserialize
+            let host_metadata = cf.host_metadata::<serde_json::Value>().ok().flatten();
+
+            CfDetails {
+                asn: cf.asn(),
+                as_organization: cf.as_organization(),
+                colo: Some(cf.colo()),
+                http_protocol: Some(cf.http_protocol()),
+                tls_version: Some(cf.tls_version()),
+                tls_cipher: Some(cf.tls_cipher()),
+                city: cf.city(),
+                region: cf.region(),
+                region_code: cf.region_code(),
+                country: cf.country(),
+                continent: cf.continent(),
+                coordinates,
+                postal_code: cf.postal_code(),
+                metro_code: cf.metro_code(),
+                timezone: Some(cf.timezone_name()),
+                is_eu_country: Some(cf.is_eu_country()),
+                bot_management,
+                verified_bot_category: cf.verified_bot_category(),
+                tls_client_auth,
+                request_priority,
+                host_metadata,
+            }
+        }));
+
+            match result {
+                Ok(details) => Some(details),
+                Err(_) => None,
             }
         });
-
-        let coordinates = cf.coordinates().map(|(lat, lon)| Coordinates {
-            latitude: lat,
-            longitude: lon,
-        });
-
-        let request_priority = cf.request_priority().map(|rp| RequestPriorityDetails {
-            weight: Some(rp.weight),
-            exclusive: Some(rp.exclusive),
-            group: Some(rp.group),
-            group_weight: Some(rp.group_weight),
-        });
-
-        // host_metadata returns a JsValue, attempt to deserialize
-        let host_metadata = cf.host_metadata::<serde_json::Value>().ok().flatten();
-
-        CfDetails {
-            asn: cf.asn(),
-            as_organization: cf.as_organization(),
-            colo: Some(cf.colo()),
-            http_protocol: Some(cf.http_protocol()),
-            tls_version: Some(cf.tls_version()),
-            tls_cipher: Some(cf.tls_cipher()),
-            city: cf.city(),
-            region: cf.region(),
-            region_code: cf.region_code(),
-            country: cf.country(),
-            continent: cf.continent(),
-            coordinates,
-            postal_code: cf.postal_code(),
-            metro_code: cf.metro_code(),
-            timezone: Some(cf.timezone_name()),
-            is_eu_country: Some(cf.is_eu_country()),
-            bot_management,
-            verified_bot_category: cf.verified_bot_category(),
-            tls_client_auth,
-            request_priority,
-            host_metadata,
-        }
-    });
 
     let details = RequestDetails {
         method,
